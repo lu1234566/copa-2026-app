@@ -1,0 +1,36 @@
+name: Gerar APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Configurar Java (JDK 17)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configurar Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Dar permissão de execução ao gradlew
+        run: chmod +x ./gradlew
+
+      - name: Compilar APK de debug
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Publicar o APK como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: copa-2026-replay-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
