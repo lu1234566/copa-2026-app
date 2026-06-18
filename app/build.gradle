@@ -28,5 +28,5 @@ android {
 }
 
 dependencies {
-    // App nativo mínimo, sem libs externas (usa WebView do sistema)
+    implementation 'androidx.browser:browser:1.8.0'
 }
