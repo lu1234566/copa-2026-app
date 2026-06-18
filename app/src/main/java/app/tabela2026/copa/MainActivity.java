@@ -6,8 +6,10 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Message;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
@@ -22,13 +24,13 @@ public class MainActivity extends Activity {
 
     private WebView webView;
     private ProgressBar progressBar;
+    private FrameLayout root;
 
     private static final String START_URL = "https://tabela2026.lovable.app";
     private static final String APP_HOST = "tabela2026.lovable.app";
 
-    // User-agent de Chrome "de verdade" para o Google aceitar o login dentro do WebView.
-    // (sem o token "wv" que denuncia um WebView)
-    private static final String DESKTOP_SAFE_UA =
+    // User-agent de Chrome "de verdade" para o Google aceitar o login no WebView
+    private static final String SAFE_UA =
             "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) "
             + "Chrome/120.0.0.0 Mobile Safari/537.36";
 
@@ -37,7 +39,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        FrameLayout root = new FrameLayout(this);
+        root = new FrameLayout(this);
 
         webView = new WebView(this);
         webView.setLayoutParams(new FrameLayout.LayoutParams(
@@ -55,45 +57,42 @@ public class MainActivity extends Activity {
         root.addView(progressBar);
         setContentView(root);
 
-        WebSettings settings = webView.getSettings();
+        configureWebView(webView, true);
+
+        CookieManager.getInstance().setAcceptCookie(true);
+        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
+
+        if (savedInstanceState != null) {
+            webView.restoreState(savedInstanceState);
+        } else {
+            webView.loadUrl(START_URL);
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private void configureWebView(WebView wv, boolean main) {
+        WebSettings settings = wv.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setDatabaseEnabled(true);
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
         settings.setSupportZoom(false);
-        settings.setBuiltInZoomControls(false);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         settings.setJavaScriptCanOpenWindowsAutomatically(true);
-        settings.setSupportMultipleWindows(false);
-        settings.setUserAgentString(DESKTOP_SAFE_UA);
+        settings.setSupportMultipleWindows(true);
+        settings.setUserAgentString(SAFE_UA);
 
-        CookieManager.getInstance().setAcceptCookie(true);
-        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
-
-        webView.setWebViewClient(new WebViewClient() {
+        wv.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
-                String host = uri.getHost();
-                if (host == null) host = "";
-
-                // O proprio site, o Google e o Supabase carregam DENTRO do WebView,
-                // pra que o login compartilhe os mesmos cookies do app.
-                if (host.contains(APP_HOST)
-                        || host.contains("accounts.google.com")
-                        || host.contains("google.com")
-                        || host.contains("gstatic.com")
-                        || host.contains("googleusercontent.com")
-                        || host.contains("oauth.lovable.app")
-                        || host.contains("supabase.co")
-                        || host.contains("lovable.app")) {
-                    return false; // navega no WebView
+                if (isInternal(uri)) {
+                    view.loadUrl(uri.toString());
+                    return true;
                 }
-
-                // Resto (links externos de verdade) -> navegador do sistema
                 try {
                     startActivity(new Intent(Intent.ACTION_VIEW, uri));
                     return true;
@@ -114,7 +113,7 @@ public class MainActivity extends Activity {
             }
         });
 
-        webView.setWebChromeClient(new WebChromeClient() {
+        wv.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onProgressChanged(WebView view, int newProgress) {
                 progressBar.setProgress(newProgress);
@@ -124,13 +123,50 @@ public class MainActivity extends Activity {
             public void onPermissionRequest(final PermissionRequest request) {
                 request.grant(request.getResources());
             }
-        });
 
-        if (savedInstanceState != null) {
-            webView.restoreState(savedInstanceState);
-        } else {
-            webView.loadUrl(START_URL);
-        }
+            // Quando o site tenta abrir o login numa NOVA janela (window.open / target=_blank),
+            // criamos um WebView temporario por cima — assim o login NAO escapa pro navegador.
+            @Override
+            public boolean onCreateWindow(WebView view, boolean isDialog,
+                                          boolean isUserGesture, Message resultMsg) {
+                final WebView popup = new WebView(MainActivity.this);
+                popup.setLayoutParams(new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT));
+                configureWebView(popup, false);
+                root.addView(popup);
+
+                popup.setWebChromeClient(new WebChromeClient() {
+                    @Override
+                    public void onCloseWindow(WebView w) {
+                        root.removeView(w);
+                        w.destroy();
+                        // recarrega o app principal ja autenticado
+                        webView.reload();
+                    }
+                });
+
+                WebView.WebViewTransport transport =
+                        (WebView.WebViewTransport) resultMsg.obj;
+                transport.setWebView(popup);
+                resultMsg.sendToTarget();
+                return true;
+            }
+        });
+    }
+
+    private boolean isInternal(Uri uri) {
+        String host = uri.getHost();
+        if (host == null) return false;
+        return host.contains(APP_HOST)
+                || host.contains("accounts.google.com")
+                || host.contains("google.com")
+                || host.contains("gstatic.com")
+                || host.contains("googleusercontent.com")
+                || host.contains("googleapis.com")
+                || host.contains("oauth.lovable.app")
+                || host.contains("supabase.co")
+                || host.contains("lovable.app");
     }
 
     @Override
