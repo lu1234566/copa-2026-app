@@ -4,7 +4,6 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Bitmap;
-import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.KeyEvent;
@@ -19,17 +18,19 @@ import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.ProgressBar;
 
-import androidx.browser.customtabs.CustomTabsIntent;
-
 public class MainActivity extends Activity {
 
     private WebView webView;
     private ProgressBar progressBar;
 
-    // URL que o app carrega
     private static final String START_URL = "https://tabela2026.lovable.app";
-    // Host do site
     private static final String APP_HOST = "tabela2026.lovable.app";
+
+    // User-agent de Chrome "de verdade" para o Google aceitar o login dentro do WebView.
+    // (sem o token "wv" que denuncia um WebView)
+    private static final String DESKTOP_SAFE_UA =
+            "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) "
+            + "Chrome/120.0.0.0 Mobile Safari/537.36";
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -66,7 +67,8 @@ public class MainActivity extends Activity {
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         settings.setJavaScriptCanOpenWindowsAutomatically(true);
-        settings.setSupportMultipleWindows(true);
+        settings.setSupportMultipleWindows(false);
+        settings.setUserAgentString(DESKTOP_SAFE_UA);
 
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
@@ -74,7 +76,30 @@ public class MainActivity extends Activity {
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                return handleUrl(request.getUrl());
+                Uri uri = request.getUrl();
+                String host = uri.getHost();
+                if (host == null) host = "";
+
+                // O proprio site, o Google e o Supabase carregam DENTRO do WebView,
+                // pra que o login compartilhe os mesmos cookies do app.
+                if (host.contains(APP_HOST)
+                        || host.contains("accounts.google.com")
+                        || host.contains("google.com")
+                        || host.contains("gstatic.com")
+                        || host.contains("googleusercontent.com")
+                        || host.contains("oauth.lovable.app")
+                        || host.contains("supabase.co")
+                        || host.contains("lovable.app")) {
+                    return false; // navega no WebView
+                }
+
+                // Resto (links externos de verdade) -> navegador do sistema
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, uri));
+                    return true;
+                } catch (Exception e) {
+                    return false;
+                }
             }
 
             @Override
@@ -85,6 +110,7 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 progressBar.setVisibility(View.GONE);
+                CookieManager.getInstance().flush();
             }
         });
 
@@ -98,19 +124,6 @@ public class MainActivity extends Activity {
             public void onPermissionRequest(final PermissionRequest request) {
                 request.grant(request.getResources());
             }
-
-            // Trata window.open / target=_blank (o botao de login costuma usar isso)
-            @Override
-            public boolean onCreateWindow(WebView view, boolean isDialog,
-                                          boolean isUserGesture, android.os.Message resultMsg) {
-                WebView.HitTestResult result = view.getHitTestResult();
-                String url = result.getExtra();
-                if (url != null) {
-                    handleUrl(Uri.parse(url));
-                    return false;
-                }
-                return false;
-            }
         });
 
         if (savedInstanceState != null) {
@@ -120,81 +133,9 @@ public class MainActivity extends Activity {
         }
     }
 
-    /**
-     * Decide como abrir cada URL:
-     * - paginas de login (Google OAuth, oauth.lovable.app, supabase auth) -> Chrome Custom Tab
-     *   (o Google bloqueia OAuth dentro de WebView, entao precisa abrir numa aba do Chrome)
-     * - paginas do proprio site -> navega no WebView
-     * - resto -> navegador externo
-     * Retorna true se o WebView NAO deve carregar a URL (porque ja tratamos).
-     */
-    private boolean handleUrl(Uri uri) {
-        if (uri == null) return false;
-        String url = uri.toString();
-        String host = uri.getHost();
-        if (host == null) host = "";
-
-        if (isAuthUrl(url, host)) {
-            openCustomTab(uri);
-            return true; // nao carrega no WebView
-        }
-
-        if (host.contains(APP_HOST)) {
-            return false; // WebView carrega normalmente
-        }
-
-        // Link externo qualquer -> navegador do sistema
-        try {
-            startActivity(new Intent(Intent.ACTION_VIEW, uri));
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private boolean isAuthUrl(String url, String host) {
-        return host.contains("accounts.google.com")
-                || host.contains("oauth.lovable.app")
-                || host.contains("appleid.apple.com")
-                || (host.contains("supabase.co") && url.contains("/auth/"))
-                || url.contains("accounts.google.com/o/oauth2")
-                || url.contains("provider=google");
-    }
-
-    private void openCustomTab(Uri uri) {
-        try {
-            CustomTabsIntent intent = new CustomTabsIntent.Builder()
-                    .setShowTitle(true)
-                    .build();
-            intent.intent.putExtra(Intent.EXTRA_REFERRER,
-                    Uri.parse("android-app://" + getPackageName()));
-            intent.launchUrl(this, uri);
-        } catch (Exception e) {
-            // Fallback: navegador padrao
-            try {
-                startActivity(new Intent(Intent.ACTION_VIEW, uri));
-            } catch (Exception ignored) {
-            }
-        }
-    }
-
-    // Quando o login termina e o navegador redireciona de volta pro app via deep link,
-    // recarregamos o site dentro do WebView ja autenticado.
     @Override
-    protected void onNewIntent(Intent intent) {
-        super.onNewIntent(intent);
-        if (intent != null && intent.getData() != null) {
-            Uri data = intent.getData();
-            if (data.toString().contains(APP_HOST)) {
-                webView.loadUrl(data.toString());
-            }
-        }
-    }
-
-    @Override
-    protected void onResume() {
-        super.onResume();
-        // Reaplica cookies apos voltar da Custom Tab de login
+    protected void onPause() {
+        super.onPause();
         CookieManager.getInstance().flush();
     }
 
